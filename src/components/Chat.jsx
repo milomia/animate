@@ -4,25 +4,43 @@ import './Chat.css';
 const Chat = () => {
   const [messages, setMessages] = useState([]);
   const [newMessage, setNewMessage] = useState('');
+  const [url, setUrl] = useState('');
+  const [data, setData] = useState(null);
+  const [error, setError] = useState(null);
 
   const handleSendMessage = async(e) => {
     e.preventDefault();
+    let query_url=""
+    if (url.trim())
+    {
+      query_url = 'http://0.0.0.0:8000/api/query_web';
+    }
+    else
+    {
+      query_url = 'http://0.0.0.0:8000/api/query_llm'
+    }
     if (newMessage.trim()) {
       setMessages([...messages, "this is a very long answer to no question the quick brown fox sat on the lazy cat"]);
       setNewMessage('');
          // Perform file upload operation
          const formData = new FormData();
          formData.append('query', newMessage);
-      const response = await fetch('http://0.0.0.0:8000/api/query', {
+         formData.append('url', url);
+         debugger;
+      const response = await fetch(query_url, {
         method: 'POST',
         body: formData,
       });
       console.log(response);
       const result = await response.json();
-      setResponseMessage(result.message);
-      console.log('Item created successfully:', result.item);
-      setMessages([...messages, "still doesnt work !!"]);
-      setModalIsOpen(false);
+      const str = JSON.stringify(result['result']);
+      console.log(str);
+      // debugger;
+      
+      // the code below doesnt work ?
+      console.log('Item created successfully:', str);
+      setMessages([...messages, str]);
+      // setModalIsOpen(false);
     }
   };
 
@@ -39,6 +57,12 @@ const Chat = () => {
           value={newMessage}
           onChange={(e) => setNewMessage(e.target.value)}
           placeholder="Type your message..."
+        />
+        <input
+          type="text"
+          value={url}
+          onChange={(e) => setUrl(e.target.value)}
+          placeholder="Enter URL"
         />
         <button type="submit">Query</button>
       </form>

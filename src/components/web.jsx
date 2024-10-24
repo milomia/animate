@@ -4,17 +4,27 @@ const FetchAndParseURL = () => {
   const [url, setUrl] = useState('');
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
+  const [newMessage, setNewMessage] = useState('what are the headlines?');
 
-  const handleFetch = async () => {
-    try {
-      const response = await fetch(url);
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
+  const handleFetch = async(e) => {
+    e.preventDefault();
+    if (newMessage.trim()) {
+      debugger;
+      setNewMessage('');
+         // Perform file upload operation
+         const formData = new FormData();
+         // pass the url back
+         formData.append('query', url);
+      const response = await fetch('http://0.0.0.0:8000/api/query_web', {
+        method: 'POST',
+        body: formData,
+      });
+      console.log(response);
       const result = await response.json();
-      setData(result);
-    } catch (err) {
-      setError(err.message);
+      const str = JSON.stringify(result['result']);
+      console.log(str);
+      setMessages([...messages, str]);
+      // setModalIsOpen(false);
     }
   };
 
