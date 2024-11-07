@@ -39,7 +39,7 @@ const Login = () => {
   return (
     <div className="login-container">
       <form onSubmit={handleSubmit}>
-        <h2>Ollama Chat</h2>
+        <h2>Ollama Chat (Telegraph Demo)</h2>
         <div className="form-group">
           <label>Login (email)</label>
           <input
