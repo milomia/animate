@@ -20,7 +20,7 @@ const Chat = () => {
       query_url = 'http://0.0.0.0:8000/api/query_llm'
     }
     if (newMessage.trim()) {
-      setMessages([...messages, "this is a very long answer to no question the quick brown fox sat on the lazy cat"]);
+      setMessages([...messages, "this query will take a few seconds"]);
       setNewMessage('');
          // Perform file upload operation
          const formData = new FormData();
