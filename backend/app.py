@@ -13,6 +13,7 @@ import nest_asyncio
 # Apply nest_asyncio to fix the event loop issue
 nest_asyncio.apply()
 
+
 # Load environment variables
 load_dotenv()
 
@@ -30,6 +31,8 @@ llm = Ollama(model="mistral", request_timeout=30.0)
 parser = LlamaParse(result_type="markdown")
 file_extractor = {".docx": parser}
 embed_model = resolve_embed_model("local:BAAI/bge-m3")
+documents = SimpleDirectoryReader("./files", file_extractor=file_extractor).load_data()
+vector_index = VectorStoreIndex.from_documents(documents, embed_model=embed_model)
 
 async def query_web(url: str, prompt: str):
     documents = SimpleWebPageReader(html_to_text=True).load_data([url])
@@ -39,8 +42,8 @@ async def query_web(url: str, prompt: str):
     return result
 
 async def query_llm(prompt: str):
-    documents = SimpleDirectoryReader("./files", file_extractor=file_extractor).load_data()
-    vector_index = VectorStoreIndex.from_documents(documents, embed_model=embed_model)
+    # documents = SimpleDirectoryReader("./files", file_extractor=file_extractor).load_data()
+    # vector_index = VectorStoreIndex.from_documents(documents, embed_model=embed_model)
     query_engine = vector_index.as_query_engine(llm=llm)
     result = await query_engine.aquery(prompt)
     return result
