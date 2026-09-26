@@ -1,23 +1,24 @@
-from fastapi import FastAPI, File, UploadFile, Form
-from llama_index.llms.ollama import Ollama
+from pathlib import Path
+from typing import Optional
+
+from dotenv import load_dotenv
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from llama_parse import LlamaParse
-from llama_index.core import VectorStoreIndex, SimpleDirectoryReader
-from llama_index.readers.web import SimpleWebPageReader
-from fastapi import FastAPI, File, UploadFile, Form
+from llama_index.core import SimpleDirectoryReader, VectorStoreIndex
 from llama_index.core.embeddings import resolve_embed_model
-from dotenv import load_dotenv
+from llama_index.llms.ollama import Ollama
+from llama_index.readers.web import SimpleWebPageReader
+from llama_parse import LlamaParse
 import nest_asyncio
 
 # Apply nest_asyncio to fix the event loop issue
 nest_asyncio.apply()
 
-
 # Load environment variables
 load_dotenv()
 
-app = FastAPI()
+app = FastAPI(title="Animate RAG API")
 
 app.add_middleware(
     CORSMiddleware,
@@ -26,48 +27,76 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize LLM and other components
+FILES_DIR = Path("files")
+FILES_DIR.mkdir(parents=True, exist_ok=True)
+
 llm = Ollama(model="mistral", request_timeout=30.0)
 parser = LlamaParse(result_type="markdown")
 file_extractor = {".docx": parser}
 embed_model = resolve_embed_model("local:BAAI/bge-m3")
-documents = SimpleDirectoryReader("./files", file_extractor=file_extractor).load_data()
-vector_index = VectorStoreIndex.from_documents(documents, embed_model=embed_model)
 
-async def query_web(url: str, prompt: str):
+
+def build_index_from_files() -> VectorStoreIndex:
+    documents = SimpleDirectoryReader(str(FILES_DIR), file_extractor=file_extractor).load_data()
+    return VectorStoreIndex.from_documents(documents, embed_model=embed_model)
+
+
+@app.on_event("startup")
+async def startup_event():
+    app.state.vector_index = build_index_from_files()
+
+
+async def query_index(index: VectorStoreIndex, prompt: str) -> str:
+    query_engine = index.as_query_engine(llm=llm)
+    result = await query_engine.aquery(prompt)
+    return str(result)
+
+
+async def query_web(url: str, prompt: str) -> str:
     documents = SimpleWebPageReader(html_to_text=True).load_data([url])
-    vector_index = VectorStoreIndex.from_documents(documents, embed_model=embed_model)
-    query_engine = vector_index.as_query_engine(llm=llm)
-    result = await query_engine.aquery(prompt)
-    return result
+    web_index = VectorStoreIndex.from_documents(documents, embed_model=embed_model)
+    return await query_index(web_index, prompt)
 
-async def query_llm(prompt: str):
-    # documents = SimpleDirectoryReader("./files", file_extractor=file_extractor).load_data()
-    # vector_index = VectorStoreIndex.from_documents(documents, embed_model=embed_model)
-    query_engine = vector_index.as_query_engine(llm=llm)
-    result = await query_engine.aquery(prompt)
-    return result
 
 @app.post("/api/upload")
 async def upload_file(file: UploadFile = File(...), filename: str = Form(...)):
-    file_location = f"files/{filename}"
-    with open(file_location, "wb") as f:
-        f.write(await file.read())
-    return JSONResponse(content={"message": f"File '{filename}' uploaded successfully"})
+    safe_name = Path(filename).name
+    if not safe_name:
+        raise HTTPException(status_code=400, detail="Filename is required")
+
+    # Optional: restrict file types
+    allowed_exts = {".pdf", ".docx", ".txt", ".md"}
+    if Path(safe_name).suffix.lower() not in allowed_exts:
+        raise HTTPException(status_code=400, detail=f"Unsupported file type: {safe_name}")
+
+    file_path = FILES_DIR / safe_name
+    contents = await file.read()
+    file_path.write_bytes(contents)
+
+    # Rebuild index after upload
+    app.state.vector_index = build_index_from_files()
+
+    return JSONResponse(content={"message": f"File '{safe_name}' uploaded successfully"})
+
 
 @app.post("/api/query_llm")
 async def process_query(query: str = Form(...)):
-    result = await query_llm(query)
-    print("result=",result)
-    return JSONResponse(content={"result": str(result)})
+    try:
+        result = await query_index(app.state.vector_index, query)
+        return JSONResponse(content={"result": result})
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Query failed: {str(exc)}") from exc
+
 
 @app.post("/api/query_web")
-async def process_query(url: str = Form(...), query=Form(...)):
-    result = await query_web(url, query)
-    print("result=",result)
-    return JSONResponse(content={"result": str(result)})
+async def process_web_query(url: str = Form(...), query: str = Form(...)):
+    try:
+        result = await query_web(url, query)
+        return JSONResponse(content={"result": result})
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Web query failed: {str(exc)}") from exc
+
 
 if __name__ == "__main__":
-    print("hello mike")
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
