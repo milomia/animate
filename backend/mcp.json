@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "file-upload-server": {
+      "command": "npx",
+      "args": ["-y","firecrawl-mcp"]
+    }
+  }
+}
+
