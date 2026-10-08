@@ -33,7 +33,7 @@ FILES_DIR.mkdir(parents=True, exist_ok=True)
 llm = Ollama(model="mistral", request_timeout=30.0)
 parser = LlamaParse(result_type="markdown")
 file_extractor = {".docx": parser}
-embed_model = resolve_embed_model("local:BAAI/bge-m3")
+embed_model = resolve_embed_model("local:BAAI/bge-small-en-v1.5")
 
 
 def build_index_from_files() -> VectorStoreIndex:
