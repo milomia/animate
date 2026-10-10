@@ -30,7 +30,7 @@ const Chat: React.FC = () => {
       });
       console.log(response);
       const result: ApiResponse = await response.json();
-      const str = JSON.stringify(result.result);
+      const str = typeof result.result === 'string' ? result.result : JSON.stringify(result.result);
       console.log(str);
       // debugger;
       

@@ -33,9 +33,10 @@ const FileUploadModal: React.FC = () => {
           alert(`Upload failed: ${response.statusText}`);
         return;
     }
-      // setModalIsOpen(false);
+      setSelectedFile(null);
       closeModal();
-      alert('Mike File uploaded successfully');
+      // alert() blocks rendering, so defer it until the modal has closed
+      setTimeout(() => alert('File uploaded successfully'), 100);
   } catch (error) {
     console.error('Upload error:', error);
     alert('Mike Upload failed. Please check if the backend server is running.');

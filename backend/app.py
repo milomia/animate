@@ -27,23 +27,26 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-FILES_DIR = Path("files")
+FILES_DIR = Path(__file__).resolve().parent / "files"
 FILES_DIR.mkdir(parents=True, exist_ok=True)
 
-llm = Ollama(model="mistral", request_timeout=30.0)
+llm = Ollama(model="qwen3.5:4b", request_timeout=120.0, context_window=8192, thinking=False)
 parser = LlamaParse(result_type="markdown")
 file_extractor = {".docx": parser}
 embed_model = resolve_embed_model("local:BAAI/bge-small-en-v1.5")
 
 
-def build_index_from_files() -> VectorStoreIndex:
-    documents = SimpleDirectoryReader(str(FILES_DIR), file_extractor=file_extractor).load_data()
+async def build_index_from_files() -> VectorStoreIndex:
+    if not any(p.is_file() for p in FILES_DIR.iterdir()):
+        return VectorStoreIndex.from_documents([], embed_model=embed_model)
+    reader = SimpleDirectoryReader(str(FILES_DIR), file_extractor=file_extractor)
+    documents = await reader.aload_data()
     return VectorStoreIndex.from_documents(documents, embed_model=embed_model)
 
 
 @app.on_event("startup")
 async def startup_event():
-    app.state.vector_index = build_index_from_files()
+    app.state.vector_index = await build_index_from_files()
 
 
 async def query_index(index: VectorStoreIndex, prompt: str) -> str:
@@ -74,9 +77,18 @@ async def upload_file(file: UploadFile = File(...), filename: str = Form(...)):
     file_path.write_bytes(contents)
 
     # Rebuild index after upload
-    app.state.vector_index = build_index_from_files()
+    app.state.vector_index = await build_index_from_files()
 
     return JSONResponse(content={"message": f"File '{safe_name}' uploaded successfully"})
+
+
+def to_http_error(exc: Exception, prefix: str) -> HTTPException:
+    if isinstance(exc, HTTPException):
+        return exc
+    status = getattr(exc, "status_code", None)
+    if not isinstance(status, int) or not 400 <= status < 600:
+        status = 500
+    return HTTPException(status_code=status, detail=f"{prefix}: {type(exc).__name__}: {exc}")
 
 
 @app.post("/api/query_llm")
@@ -85,7 +97,7 @@ async def process_query(query: str = Form(...)):
         result = await query_index(app.state.vector_index, query)
         return JSONResponse(content={"result": result})
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Query failed: {str(exc)}") from exc
+        raise to_http_error(exc, "Query failed") from exc
 
 
 @app.post("/api/query_web")
@@ -94,7 +106,7 @@ async def process_web_query(url: str = Form(...), query: str = Form(...)):
         result = await query_web(url, query)
         return JSONResponse(content={"result": result})
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Web query failed: {str(exc)}") from exc
+        raise to_http_error(exc, "Web query failed") from exc
 
 
 if __name__ == "__main__":
