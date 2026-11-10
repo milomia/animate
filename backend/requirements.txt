@@ -93,5 +93,6 @@ yarl==1.9.4
 
 llama-index-core
 llama-parse
+lxml==5.4.0
 weaviate-client
 llama-index-llms-ollama
