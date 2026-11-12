@@ -4,10 +4,15 @@ raw OOXML, HTML as strings), so the suite needs no sample files and runs offline
     cd backend && .venv/bin/python -m unittest tests.test_ingestion -v
 """
 import io
+import os
 import unittest
 import zipfile
 
 import fitz
+
+# Parse in-process in these suites; tests/test_secure_pdf.py and tests/test_secure_docx.py cover the sandbox.
+os.environ["INGEST_PDF_SANDBOX"] = "0"
+os.environ["INGEST_DOCX_SANDBOX"] = "0"
 
 from ingestion import IngestionError, chunk_document, ingest_bytes
 from ingestion.chunker import Chunk
@@ -200,8 +205,10 @@ class PdfScannedAndBrokenTests(unittest.TestCase):
         self.assertEqual(doc.warnings, [])
 
     def test_garbage_and_encrypted_pdfs_raise_a_clear_error(self):
-        with self.assertRaisesRegex(IngestionError, "Not a readable PDF"):
+        with self.assertRaisesRegex(IngestionError, "not a PDF"):
             ingest_bytes("bad.pdf", b"this is not a pdf")
+        with self.assertRaisesRegex(IngestionError, "Not a readable PDF"):
+            ingest_bytes("truncated.pdf", b"%PDF-1.7\n1 0 obj\n<< /Type /Catalog")
         encrypted = fitz.open()
         encrypted.new_page().insert_text((50, 80), "secret")
         data = encrypted.tobytes(encryption=fitz.PDF_ENCRYPT_AES_256, owner_pw="o", user_pw="u")

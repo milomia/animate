@@ -31,21 +31,38 @@ _BREAK = object()  # marks a page break inside a paragraph's text parts
 _LIST_STYLE_RE = re.compile(r"^list (bullet|number|paragraph|continue)", re.I)
 
 
+def read_part(archive, name, limit=MAX_XML_BYTES):
+    """Read one zip entry, never more than `limit` bytes, whatever size the archive's header claims: a
+    forged header cannot make this decompress a bomb into memory."""
+    try:
+        with archive.open(name) as handle:
+            data = handle.read(limit + 1)
+    except (RuntimeError, NotImplementedError, zipfile.BadZipFile) as exc:
+        raise IngestionError(f"The part '{name}' cannot be read: {exc}") from exc
+    if len(data) > limit:
+        raise IngestionError("The document is too large to read safely.")
+    return data
+
+
+def safe_xml_parser():
+    """No entity expansion and no network: a DOCX cannot make the parser read local files or fetch URLs."""
+    return etree.XMLParser(resolve_entities=False, no_network=True, load_dtd=False, huge_tree=False)
+
+
 def parse_docx(data: bytes, source: str = "document.docx") -> ParsedDocument:
     try:
         archive = zipfile.ZipFile(io.BytesIO(data))
     except zipfile.BadZipFile as exc:
         raise IngestionError("Not a .docx file (it is not a zip archive; legacy .doc files are not supported).") from exc
     with archive:
-        if "word/document.xml" not in archive.namelist():
+        names = set(archive.namelist())
+        if "word/document.xml" not in names:
             raise IngestionError("Not a .docx file: word/document.xml is missing.")
-        if archive.getinfo("word/document.xml").file_size > MAX_XML_BYTES:
-            raise IngestionError("The document is too large to read safely.")
-        parser = etree.XMLParser(resolve_entities=False, no_network=True)
+        parser = safe_xml_parser()
         try:
-            root = etree.fromstring(archive.read("word/document.xml"), parser=parser)
-            styles = _read_styles(etree.fromstring(archive.read("word/styles.xml"), parser=parser)) \
-                if "word/styles.xml" in archive.namelist() else {}
+            root = etree.fromstring(read_part(archive, "word/document.xml"), parser=parser)
+            styles = _read_styles(etree.fromstring(read_part(archive, "word/styles.xml"), parser=parser)) \
+                if "word/styles.xml" in names else {}
         except etree.XMLSyntaxError as exc:
             raise IngestionError(f"The document XML is damaged: {exc}") from exc
 
@@ -53,6 +70,8 @@ def parse_docx(data: bytes, source: str = "document.docx") -> ParsedDocument:
     if body is None:
         raise IngestionError("The document has no body.")
     reader = _Reader(styles)
+    background = root.find(_w("background"))
+    reader.page_colored = background is not None and (background.get(_w("color")) or "auto").lower() not in {"auto", "ffffff"}
     reader.walk(body)
     blocks = reader.finish()
 
@@ -60,6 +79,10 @@ def parse_docx(data: bytes, source: str = "document.docx") -> ParsedDocument:
     doc.title = next((b.text for b in blocks if b.kind == "heading" and b.level <= 1), None)
     if reader.saw_text_box:
         doc.warnings.append("The document contains text boxes, which are not extracted.")
+    if reader.hidden_chars:
+        doc.warnings.append(f"Removed {reader.hidden_chars} characters of hidden text (formatted as hidden, tiny, "
+                            "or white on a plain background). Hidden text is a known way to smuggle instructions "
+                            "to an AI model.")
     return doc
 
 
@@ -72,12 +95,39 @@ def _read_styles(root):
         name = style.find(_w("name"))
         based_on = style.find(_w("basedOn"))
         outline = style.find(f"{_w('pPr')}/{_w('outlineLvl')}")
+        rpr = style.find(_w("rPr"))
         styles[style_id] = {
             "name": (name.get(_w("val")) if name is not None else "") or "",
             "based_on": based_on.get(_w("val")) if based_on is not None else None,
             "outline": _int(outline.get(_w("val"))) if outline is not None else None,
+            "props": _run_props(rpr) if rpr is not None else {},
         }
     return styles
+
+
+def _on(element) -> bool:
+    """A Word on/off property: present means on, unless it says val=0/false/off."""
+    return (element.get(_w("val")) or "true").lower() not in {"0", "false", "off"}
+
+
+def _run_props(rpr) -> dict:
+    """The run properties that can hide text from a reader, from a <w:rPr>."""
+    props = {}
+    vanish = rpr.find(_w("vanish"))
+    if vanish is not None:
+        props["vanish"] = _on(vanish)
+    size = rpr.find(_w("sz"))
+    if size is not None and _int(size.get(_w("val"))) is not None:
+        props["size"] = _int(size.get(_w("val")))  # half-points
+    color = rpr.find(_w("color"))
+    if color is not None:
+        props["color"] = (color.get(_w("val")) or "").upper()
+    shading = rpr.find(_w("shd"))
+    highlight = rpr.find(_w("highlight"))
+    props["shaded"] = bool(
+        (shading is not None and (shading.get(_w("fill")) or "auto").lower() not in {"auto", "ffffff"})
+        or (highlight is not None and (highlight.get(_w("val")) or "none").lower() != "none"))
+    return props
 
 
 def _int(value, default=None):
@@ -125,6 +175,9 @@ class _Reader:
         self.blocks = []
         self.page = 1
         self.saw_text_box = False
+        self.hidden_chars = 0  # characters of hidden text removed
+        self.page_colored = False  # the page has a non-white background, so white text can be visible
+        self.cell_shaded = False  # the table cell being read has a coloured fill
 
     def walk(self, container):
         for child in container:
@@ -180,8 +233,41 @@ class _Reader:
         else:
             self.blocks.append(Block("paragraph", text, page=start, page_end=page_end))
 
+    def _style_props(self, style_id):
+        """Run properties a style contributes, base style first so a derived style overrides it."""
+        props = {}
+        for style in reversed(list(_style_chain(self.styles, style_id))):
+            props.update(style["props"])
+        return props
+
+    def _run_hidden(self, run, para_style, para_shaded):
+        """True for a run a human reader cannot see: formatted as hidden, smaller than 2 pt, or white with
+        no shading, highlight, cell fill or page colour behind it. Direct formatting beats the run's
+        character style, which beats the paragraph style."""
+        rpr = run.find(_w("rPr"))
+        props = self._style_props(para_style)
+        if rpr is not None:
+            run_style = rpr.find(_w("rStyle"))
+            if run_style is not None:
+                props.update(self._style_props(run_style.get(_w("val"))))
+            props.update(_run_props(rpr))
+        if props.get("vanish"):
+            return True
+        if props.get("size") is not None and props["size"] < 4:
+            return True
+        if props.get("color") == "FFFFFF":
+            return not (props.get("shaded") or para_shaded or self.cell_shaded or self.page_colored)
+        return False
+
     def _parts(self, element):
         parts = []
+        para_style, para_shaded = None, False
+        ppr = element.find(_w("pPr")) if element.tag == _w("p") else None
+        if ppr is not None:
+            style = ppr.find(_w("pStyle"))
+            para_style = style.get(_w("val")) if style is not None else None
+            shading = ppr.find(_w("shd"))
+            para_shaded = shading is not None and (shading.get(_w("fill")) or "auto").lower() not in {"auto", "ffffff"}
 
         def walk(node):
             for child in node:
@@ -191,6 +277,11 @@ class _Reader:
                 if tag == _w("txbxContent"):
                     self.saw_text_box = True
                 if tag in _SKIP:
+                    continue
+                if tag == _w("r") and self._run_hidden(child, para_style, para_shaded):
+                    self.hidden_chars += len("".join(t.text or "" for t in child.iter(_w("t"))).strip())
+                    parts.extend(_BREAK for br in child.iter(_w("br"), _w("lastRenderedPageBreak"))
+                                 if br.tag == _w("lastRenderedPageBreak") or br.get(_w("type")) == "page")
                     continue
                 if tag == _w("t"):
                     parts.append(child.text or "")
@@ -227,8 +318,12 @@ class _Reader:
                 if vmerge == "continue":
                     text = previous[len(row)] if len(row) < len(previous) else ""
                 else:
+                    fill = props.find(_w("shd")) if props is not None else None
+                    outer, self.cell_shaded = self.cell_shaded, (
+                        fill is not None and (fill.get(_w("fill")) or "auto").lower() not in {"auto", "ffffff"})
                     text = " ".join(filter(None, (clean_text("".join(
                         part for part in self._parts(p) if part is not _BREAK)) for p in tc.iter(_w("p")))))
+                    self.cell_shaded = outer
                 row.extend([text] * span)
             rows.append(row)
         return rows

@@ -28,6 +28,8 @@ MAX_HEADING_CHARS = 160
 MAX_BOLD_HEADING_CHARS = 80
 MIN_PAGE_TEXT_CHARS = 25  # fewer characters than this on a page that has images means "scanned"
 MIN_GUTTER_PT = 6.0
+HIDDEN_MIN_FONT_PT = 2.0  # text smaller than this cannot be read
+MAX_DRAWINGS_CHECKED = 5000  # bound the work spent looking for backgrounds on a vector-heavy page
 
 PAGE_NUMBER_RE = re.compile(r"^(page\s*)?\d{1,4}(\s*(of|/)\s*\d{1,4})?$", re.I)
 BULLET_RE = re.compile(r"^\s*(?:[•●◦▪■‣∙·\-–—*]|\(?\d{1,2}[.)]|\(?[a-z][.)])\s+")
@@ -62,15 +64,20 @@ def parse_pdf(data: bytes, source: str = "document.pdf") -> ParsedDocument:
         if pdf.needs_pass:
             raise IngestionError("The PDF is password-protected.")
         warnings, scanned, ocr_used = [], [], []
+        hidden = Counter()  # page -> characters of hidden text removed
         pages = []  # [(raw blocks, page width, page height)]
         for number, page in enumerate(pdf, start=1):
-            raws = _page_raws(page, number)
+            raws = _page_raws(page, number, hidden)
             if _is_scanned(page, raws):
                 raws = _ocr_raws(page, number)
                 (ocr_used if raws else scanned).append(number)
             pages.append((raws, page.rect.width, page.rect.height))
         title = (pdf.metadata or {}).get("title") or None
 
+    if hidden:
+        warnings.append(f"Removed {sum(hidden.values())} characters of hidden text (white on a plain background or "
+                        f"tiny) on pages {_ranges(sorted(hidden))}. Hidden text is a known way to smuggle "
+                        "instructions to an AI model.")
     if ocr_used:
         warnings.append(f"Pages {_ranges(ocr_used)} have no text layer; text was recovered with OCR and may contain errors.")
     if scanned:
@@ -88,27 +95,62 @@ def parse_pdf(data: bytes, source: str = "document.pdf") -> ParsedDocument:
 
 # --- reading one page -------------------------------------------------------------------------
 
-def _page_raws(page, number):
+def _page_raws(page, number, hidden=None):
+    """Text blocks and tables of one page. Characters outside the page box are already ignored by the
+    extraction flags; `hidden` (a Counter) collects what the visibility filter drops."""
     tables = _tables(page, number)
+    is_hidden = _hidden_test(page) if hidden is not None else None
     raws = []
     for block in page.get_text("dict", flags=fitz.TEXTFLAGS_TEXT)["blocks"]:
         if block.get("type") != 0 or _inside_any(block["bbox"], [rect for rect, _ in tables]):
             continue
-        raw = _raw_from_block(block, number)
+        raw = _raw_from_block(block, number, is_hidden, hidden)
         if raw:
             raws.append(raw)
     raws += [_Raw(number, tuple(rect), [], 0.0, False, table=table) for rect, table in tables]
     return raws
 
 
-def _raw_from_block(block, number):
+def _hidden_test(page):
+    """A predicate for spans a human reader cannot see: tiny text, and white text that is not over a
+    coloured shape or an image (white on a dark banner is ordinary design and is kept).
+    Invisible-render-mode text is NOT removed: OCR'd scans keep their real text in exactly that form."""
+    backdrops = []
+    try:
+        for drawing in page.get_drawings()[:MAX_DRAWINGS_CHECKED]:
+            fill = drawing.get("fill")
+            if fill is not None and tuple(fill) != (1.0, 1.0, 1.0) and drawing.get("fill_opacity", 1) != 0:
+                backdrops.append(drawing["rect"])
+        backdrops += [fitz.Rect(info["bbox"]) for info in page.get_image_info()]
+    except Exception:
+        pass
+
+    def hidden(span):
+        if span["size"] < HIDDEN_MIN_FONT_PT:
+            return True
+        if span["color"] == 0xFFFFFF:
+            cx, cy = (span["bbox"][0] + span["bbox"][2]) / 2, (span["bbox"][1] + span["bbox"][3]) / 2
+            return not any(r.x0 <= cx <= r.x1 and r.y0 <= cy <= r.y1 for r in backdrops)
+        return False
+
+    return hidden
+
+
+def _raw_from_block(block, number, is_hidden=None, hidden=None):
     lines, sizes, bold_chars, total = [], Counter(), 0, 0
     for line in block["lines"]:
-        text = clean_text("".join(span["text"] for span in line["spans"]))
+        spans = line["spans"]
+        if is_hidden is not None:
+            visible = [span for span in spans if not is_hidden(span)]
+            dropped = sum(len(span["text"].strip()) for span in spans if span not in visible)
+            if dropped:  # not `+= 0`: that would still create a Counter entry and trigger a warning
+                hidden[number] += dropped
+            spans = visible
+        text = clean_text("".join(span["text"] for span in spans))
         if not text:
             continue
         lines.append(text)
-        for span in line["spans"]:
+        for span in spans:
             chars = len(span["text"].strip())
             sizes[round(span["size"] * 2) / 2] += chars
             total += chars

@@ -12,6 +12,15 @@ class IngestionError(ValueError):
 
 
 @dataclass
+class Finding:
+    """One kind of risky feature found in an untrusted file by a pre-scan (secure.py, secure_docx.py)."""
+    name: str
+    severity: str  # "high" (rejected by default) | "medium" | "info"
+    meaning: str
+    count: int
+
+
+@dataclass
 class Block:
     kind: str  # "heading" | "paragraph" | "list" | "table"
     text: str  # tables: markdown; lists: one "- item" per line

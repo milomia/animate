@@ -3,6 +3,7 @@
     cd backend && .venv/bin/python -m unittest tests.test_app_ingestion -v
 """
 import io
+import os
 import shutil
 import tempfile
 import unittest
@@ -15,6 +16,10 @@ from fastapi.testclient import TestClient
 from llama_index.core import MockEmbedding
 
 import app as app_module
+# Parse in-process in these suites; tests/test_secure_pdf.py and tests/test_secure_docx.py cover the sandbox.
+os.environ["INGEST_PDF_SANDBOX"] = "0"
+os.environ["INGEST_DOCX_SANDBOX"] = "0"
+
 from ingestion import IngestionError
 from tests.test_ingestion import LOREM, STYLES, box, make_docx, make_pdf, para
 
@@ -80,8 +85,21 @@ class AppIngestionTests(unittest.TestCase):
         response = self.upload("broken.pdf", b"not really a pdf")
 
         self.assertEqual(response.status_code, 422)
-        self.assertIn("Not a readable PDF", response.json()["detail"])
+        self.assertIn("not a PDF", response.json()["detail"])
         self.assertFalse((self.folder / "broken.pdf").exists())
+        self.assertEqual(self.stored_sources(), [])
+
+    def test_risky_pdfs_and_docx_files_are_rejected_with_the_reason_and_never_stored(self):
+        from tests.test_secure_docx import macro_docx
+        from tests.test_secure_pdf import pdf_with, with_javascript
+
+        for name, data, reason in (("script.pdf", pdf_with(with_javascript), "JavaScript"),
+                                   ("macro.docx", macro_docx(), "VBA macro project")):
+            with self.subTest(name=name):
+                response = self.upload(name, data)
+                self.assertEqual(response.status_code, 422)
+                self.assertIn(reason, response.json()["detail"])
+                self.assertFalse((self.folder / name).exists())
         self.assertEqual(self.stored_sources(), [])
 
     def test_a_scanned_pdf_with_no_text_is_rejected_and_says_why(self):
